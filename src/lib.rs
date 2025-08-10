@@ -628,28 +628,44 @@ impl ClobClient {
         let mut next_cursor = next_cursor.unwrap_or(INITIAL_CURSOR).to_string();
         let mut output = Vec::new();
         while next_cursor != END_CURSOR {
+            let url = format!("{}{endpoint}", &self.host);
             let req = self
                 .http_client
-                .request(method.clone(), format!("{}{endpoint}", &self.host))
+                .request(method.clone(), url.clone())
                 .query(&query_params)
-                .query(&["next_cursor", &next_cursor]);
+                .query(&[("next_cursor", next_cursor.as_str())]);
 
             let r = headers
                 .clone()
                 .into_iter()
                 .fold(req, |r, (k, v)| r.header(HeaderName::from_static(k), v));
 
-            let resp = r.send().await?.json::<Value>().await?;
-            let new_cursor = resp["next_cursor"]
-                .as_str()
-                .expect("Failed to parse next cursor")
-                .to_owned();
+            let resp = r.send().await?;
+            let resp: Value = resp.json().await?;
+            let new_cursor = match resp["next_cursor"].as_str() {
+                Some(s) => s.to_owned(),
+                None => {
+                    return Err(anyhow!("Failed to parse next cursor"));
+                }
+            };
 
             next_cursor = new_cursor;
 
-            let results = resp["data"].clone();
-            let o = serde_json::from_value::<Vec<OpenOrder>>(results)
-                .expect("Failed to parse data from order response");
+            let mut results = resp["data"].clone();
+            // Normalize schema
+            if let Value::Array(ref mut arr) = results {
+                for item in arr.iter_mut() {
+                    if let Value::Object(ref mut map) = item {
+                        let has_type = map.contains_key("type");
+                        if !has_type {
+                            if let Some(v) = map.get("order_type").cloned().or_else(|| map.get("orderType").cloned()) {
+                                map.insert("type".to_string(), v);
+                            }
+                        }
+                    }
+                }
+            }
+            let o = serde_json::from_value::<Vec<OpenOrder>>(results)?;
             output.extend(o);
         }
         Ok(output)
@@ -717,7 +733,7 @@ impl ClobClient {
                 .http_client
                 .request(method.clone(), format!("{}{endpoint}", &self.host))
                 .query(&query_params)
-                .query(&["next_cursor", &next_cursor]);
+                .query(&[("next_cursor", next_cursor.as_str())]);
 
             let r = headers
                 .clone()
